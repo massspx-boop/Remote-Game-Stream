@@ -19,7 +19,9 @@ class RemoteInputAccessibilityService : AccessibilityService() {
                     y2.coerceIn(0f, 1f) * metrics.heightPixels)
             }
             val stroke = GestureDescription.StrokeDescription(path, 0, duration.coerceIn(80, 1000))
-            service.dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+            android.os.Handler(service.mainLooper).post {
+                service.dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+            }
         }
     }
 
