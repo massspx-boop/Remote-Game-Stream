@@ -81,7 +81,8 @@ class HostStreamService : Service() {
         try {
             server = ServerSocket(5000).apply { reuseAddress = true }
             startCapture()
-            startDiscoveryListener()
+            // Discovery is an optional convenience; a UDP bind failure must not stop TCP streaming.
+            try { startDiscoveryListener() } catch (_: Exception) {}
 
             var failedHandshakes = 0
             while (running.get()) {
