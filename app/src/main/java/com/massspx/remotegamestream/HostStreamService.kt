@@ -16,6 +16,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -75,6 +76,7 @@ class HostStreamService : Service() {
             server = ServerSocket(5000).apply { reuseAddress = true }
             startCapture()
 
+            var failedHandshakes = 0
             while (running.get()) {
                 val connected = try {
                     server?.accept() ?: break
@@ -86,7 +88,9 @@ class HostStreamService : Service() {
                 val clientRunning = AtomicBoolean(true)
                 try {
                     connected.tcpNoDelay = true
+                    if (!isPrivateLanClient(connected)) throw SecurityException("Non-private network client rejected")
                     val channel = SecureChannel.accept(connected, pairingCode ?: throw SecurityException("Missing pairing code"))
+                    failedHandshakes = 0
                     Thread({
                         readRemoteInput(channel, connected, clientRunning)
                     }, "remote-input").start()
@@ -103,8 +107,17 @@ class HostStreamService : Service() {
                         }
                         Thread.sleep(75)
                     }
-                } catch (_: Exception) {
-                    // Reject unauthenticated clients and close this session.
+                } catch (e: Exception) {
+                    // Reject failed handshakes and slow repeated guesses without exposing details.
+                    if (e is SecurityException || e is java.net.SocketTimeoutException) {
+                        failedHandshakes++
+                        if (failedHandshakes >= 5) {
+                            try { Thread.sleep(30_000) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+                            failedHandshakes = 0
+                        } else {
+                            try { Thread.sleep(1_000) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+                        }
+                    }
                 } finally {
                     clientRunning.set(false)
                     try { connected.close() } catch (_: Exception) {}
@@ -119,6 +132,11 @@ class HostStreamService : Service() {
             try { server?.close() } catch (_: Exception) {}
             server = null
         }
+    }
+
+    private fun isPrivateLanClient(socket: Socket): Boolean {
+        val address = (socket.remoteSocketAddress as? InetSocketAddress)?.address ?: return false
+        return address.isSiteLocalAddress || address.isLinkLocalAddress || address.isLoopbackAddress
     }
 
     private fun startCapture() {
