@@ -119,17 +119,12 @@ class MainActivity : Activity() {
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val dhcp = try { wifi.dhcpInfo } catch (_: Exception) { null }
 
-        // Android Hotspot clients normally receive the host phone as their DHCP gateway.
-        if (dhcp != null && dhcp.gateway != 0) {
-            val gateway = intToIp(dhcp.gateway)
-            if (canReachHost(gateway)) return gateway
-        }
-
-        // Fallback: broadcast a local discovery request; the host replies only on the private LAN.
+        // First try UDP discovery so merely searching does not open a TCP
+        // connection that would be mistaken for a failed secure handshake.
         try {
             val socket = DatagramSocket().apply {
                 broadcast = true
-                soTimeout = 2200
+                soTimeout = 1800
             }
             val request = "RGS_DISCOVER_V1".toByteArray(Charsets.UTF_8)
             val targets = linkedSetOf<InetAddress>()
@@ -139,21 +134,20 @@ class MainActivity : Activity() {
                 targets.add(InetAddress.getByName(intToIp(broadcast)))
             }
             for (target in targets) {
-                try {
-                    socket.send(DatagramPacket(request, request.size, target, 5001))
-                } catch (_: Exception) {}
+                try { socket.send(DatagramPacket(request, request.size, target, 5001)) } catch (_: Exception) {}
             }
             val buffer = ByteArray(128)
             val response = DatagramPacket(buffer, buffer.size)
-            val deadline = System.currentTimeMillis() + 2200
+            val deadline = System.currentTimeMillis() + 1800
             while (System.currentTimeMillis() < deadline) {
                 try {
                     response.length = buffer.size
                     socket.receive(response)
                     val message = String(response.data, response.offset, response.length, Charsets.UTF_8)
-                    if (message == "RGS_HOST_V1|5000" && canReachHost(response.address.hostAddress ?: "")) {
+                    if (message == "RGS_HOST_V1|5000") {
+                        val address = response.address.hostAddress
                         socket.close()
-                        return response.address.hostAddress
+                        if (!address.isNullOrBlank()) return address
                     }
                 } catch (_: SocketTimeoutException) {
                     break
@@ -161,15 +155,11 @@ class MainActivity : Activity() {
             }
             socket.close()
         } catch (_: Exception) {}
-        return null
-    }
 
-    private fun canReachHost(host: String): Boolean {
-        if (host.isBlank()) return false
-        return try {
-            Socket().use { it.connect(InetSocketAddress(host, 5000), 700) }
-            true
-        } catch (_: Exception) { false }
+        // On Android phone hotspots, the DHCP gateway is normally the host phone.
+        // Use it only as a fallback after broadcast discovery.
+        if (dhcp != null && dhcp.gateway != 0) return intToIp(dhcp.gateway)
+        return null
     }
 
     private fun intToIp(value: Int): String =
