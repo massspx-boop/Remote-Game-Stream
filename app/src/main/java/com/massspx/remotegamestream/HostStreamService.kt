@@ -14,11 +14,16 @@ import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 
 class HostStreamService : Service() {
@@ -33,6 +38,7 @@ class HostStreamService : Service() {
     private var reader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var server: ServerSocket? = null
+    private var discoverySocket: DatagramSocket? = null
     @Volatile private var client: Socket? = null
     private var pairingCode: String? = null
     private val running = AtomicBoolean(false)
@@ -75,6 +81,7 @@ class HostStreamService : Service() {
         try {
             server = ServerSocket(5000).apply { reuseAddress = true }
             startCapture()
+            startDiscoveryListener()
 
             var failedHandshakes = 0
             while (running.get()) {
@@ -91,9 +98,7 @@ class HostStreamService : Service() {
                     if (!isPrivateLanClient(connected)) throw SecurityException("Non-private network client rejected")
                     val channel = SecureChannel.accept(connected, pairingCode ?: throw SecurityException("Missing pairing code"))
                     failedHandshakes = 0
-                    Thread({
-                        readRemoteInput(channel, connected, clientRunning)
-                    }, "remote-input").start()
+                    Thread({ readRemoteInput(channel, connected, clientRunning) }, "remote-input").start()
 
                     while (running.get() && clientRunning.get() && !connected.isClosed) {
                         val image = reader?.acquireLatestImage()
@@ -108,7 +113,6 @@ class HostStreamService : Service() {
                         Thread.sleep(75)
                     }
                 } catch (e: Exception) {
-                    // Reject failed handshakes and slow repeated guesses without exposing details.
                     if (e is SecurityException || e is java.net.SocketTimeoutException) {
                         failedHandshakes++
                         if (failedHandshakes >= 5) {
@@ -125,18 +129,56 @@ class HostStreamService : Service() {
                 }
             }
         } catch (_: Exception) {
-            // Server stopped or screen capture failed.
         } finally {
             running.set(false)
+            try { discoverySocket?.close() } catch (_: Exception) {}
+            discoverySocket = null
             stopCapture()
             try { server?.close() } catch (_: Exception) {}
             server = null
         }
     }
 
+    private fun startDiscoveryListener() {
+        val socket = DatagramSocket(null).apply {
+            reuseAddress = true
+            broadcast = true
+            soTimeout = 1000
+            bind(InetSocketAddress(5001))
+        }
+        discoverySocket = socket
+        Thread({
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val lock = try { wifi.createMulticastLock("remote-game-discovery").apply { setReferenceCounted(false); acquire() } } catch (_: Exception) { null }
+            val buffer = ByteArray(128)
+            try {
+                while (running.get() && !socket.isClosed) {
+                    try {
+                        val packet = DatagramPacket(buffer, buffer.size)
+                        socket.receive(packet)
+                        val request = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
+                        if (request == "RGS_DISCOVER_V1" && isPrivateLanAddress(packet.address)) {
+                            val reply = "RGS_HOST_V1|5000".toByteArray(Charsets.UTF_8)
+                            socket.send(DatagramPacket(reply, reply.size, packet.address, packet.port))
+                        }
+                    } catch (_: SocketTimeoutException) {
+                    } catch (_: Exception) {
+                        if (!running.get()) break
+                    }
+                }
+            } finally {
+                try { lock?.release() } catch (_: Exception) {}
+                try { socket.close() } catch (_: Exception) {}
+            }
+        }, "host-discovery").start()
+    }
+
+    private fun isPrivateLanAddress(address: InetAddress): Boolean =
+        address.isSiteLocalAddress || address.isLinkLocalAddress || address.isLoopbackAddress
+
     private fun isPrivateLanClient(socket: Socket): Boolean {
         val address = (socket.remoteSocketAddress as? InetSocketAddress)?.address ?: return false
-        return address.isSiteLocalAddress || address.isLinkLocalAddress || address.isLoopbackAddress
+        return isPrivateLanAddress(address)
     }
 
     private fun startCapture() {
@@ -146,12 +188,10 @@ class HostStreamService : Service() {
         val scale = 640f / maxOf(sourceWidth, sourceHeight)
         val width = (sourceWidth * scale).toInt().coerceAtLeast(1)
         val height = (sourceHeight * scale).toInt().coerceAtLeast(1)
-
         reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
         virtualDisplay = projection?.createVirtualDisplay(
             "RemoteGameStream", width, height, metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader!!.surface, null, null
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, null
         )
     }
 
@@ -164,8 +204,7 @@ class HostStreamService : Service() {
         val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
         buffer.rewind()
         padded.copyPixelsFromBuffer(buffer)
-        val cropped = if (paddedWidth == image.width) padded else
-            Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
+        val cropped = if (paddedWidth == image.width) padded else Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
         val bytes = java.io.ByteArrayOutputStream()
         cropped.compress(Bitmap.CompressFormat.JPEG, 55, bytes)
         if (cropped !== padded) cropped.recycle()
@@ -178,8 +217,7 @@ class HostStreamService : Service() {
             while (running.get() && clientRunning.get() && !socket.isClosed) {
                 val bytes = channel.receive()
                 if (bytes.size > 256) throw SecurityException("Input command too large")
-                val line = bytes.toString(Charsets.UTF_8)
-                val parts = line.split(",")
+                val parts = bytes.toString(Charsets.UTF_8).split(",")
                 if (parts.size != 6 || parts[0] != "G") continue
                 val values = parts.drop(1).map { it.toFloatOrNull() ?: Float.NaN }
                 if (values.any { !it.isFinite() } ||
@@ -187,9 +225,7 @@ class HostStreamService : Service() {
                     values[2] !in 0f..1f || values[3] !in 0f..1f) continue
                 val duration = parts[5].toLongOrNull() ?: continue
                 if (duration !in 80L..1000L) continue
-                RemoteInputAccessibilityService.performNormalizedGesture(
-                    values[0], values[1], values[2], values[3], duration
-                )
+                RemoteInputAccessibilityService.performNormalizedGesture(values[0], values[1], values[2], values[3], duration)
             }
         } catch (_: Exception) {
             clientRunning.set(false)
@@ -205,7 +241,7 @@ class HostStreamService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            val channel = NotificationChannel(CHANNEL_ID, "Game screen streaming", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL_ID, "ဂိမ်းမျက်နှာပြင် ထုတ်လွှင့်မှု", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
@@ -214,19 +250,20 @@ class HostStreamService : Service() {
         return if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("Remote Game Stream")
-                .setContentText("Encrypted screen sharing is active on port 5000")
-                .setSmallIcon(android.R.drawable.presence_video_online)
-                .setOngoing(true).build()
+                .setContentText("ဂိမ်းမျက်နှာပြင်ကို လုံခြုံစွာ ထုတ်လွှင့်နေသည်")
+                .setSmallIcon(android.R.drawable.presence_video_online).setOngoing(true).build()
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this).setContentTitle("Remote Game Stream")
-                .setContentText("Screen sharing active").setSmallIcon(android.R.drawable.presence_video_online).build()
+                .setContentText("ဂိမ်းမျက်နှာပြင် ထုတ်လွှင့်နေသည်")
+                .setSmallIcon(android.R.drawable.presence_video_online).build()
         }
     }
 
     override fun onDestroy() {
         running.set(false)
         try { client?.close() } catch (_: Exception) {}
+        try { discoverySocket?.close() } catch (_: Exception) {}
         try { server?.close() } catch (_: Exception) {}
         stopCapture()
         try { projection?.stop() } catch (_: Exception) {}
