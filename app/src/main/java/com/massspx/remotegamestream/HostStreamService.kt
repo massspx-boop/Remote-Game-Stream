@@ -16,8 +16,6 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
-import java.io.BufferedOutputStream
-import java.io.DataOutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -26,6 +24,7 @@ class HostStreamService : Service() {
     companion object {
         const val EXTRA_RESULT_CODE = "projection_result_code"
         const val EXTRA_RESULT_DATA = "projection_result_data"
+        const val EXTRA_PAIRING_CODE = "pairing_code"
         private const val CHANNEL_ID = "remote_stream_channel"
     }
 
@@ -33,9 +32,9 @@ class HostStreamService : Service() {
     private var reader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var server: ServerSocket? = null
-    private var client: Socket? = null
+    @Volatile private var client: Socket? = null
+    private var pairingCode: String? = null
     private val running = AtomicBoolean(false)
-    private val outputLock = Any()
 
     override fun onCreate() {
         super.onCreate()
@@ -46,13 +45,14 @@ class HostStreamService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (running.get()) return START_NOT_STICKY
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
+        pairingCode = intent?.getStringExtra(EXTRA_PAIRING_CODE)
         val data = if (Build.VERSION.SDK_INT >= 33) {
             intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
         } else {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra(EXTRA_RESULT_DATA)
         }
-        if (resultCode == 0 || data == null) {
+        if (resultCode == 0 || data == null || pairingCode?.length != 12) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -60,9 +60,7 @@ class HostStreamService : Service() {
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             projection = manager.getMediaProjection(resultCode, data)
             projection?.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() {
-                    stopSelf()
-                }
+                override fun onStop() { stopSelf() }
             }, android.os.Handler(mainLooper))
             running.set(true)
             Thread({ serve() }, "stream-server").start()
@@ -88,9 +86,9 @@ class HostStreamService : Service() {
                 val clientRunning = AtomicBoolean(true)
                 try {
                     connected.tcpNoDelay = true
-                    val out = DataOutputStream(BufferedOutputStream(connected.getOutputStream()))
+                    val channel = SecureChannel.accept(connected, pairingCode ?: throw SecurityException("Missing pairing code"))
                     Thread({
-                        readRemoteInput(connected, clientRunning)
+                        readRemoteInput(channel, connected, clientRunning)
                     }, "remote-input").start()
 
                     while (running.get() && clientRunning.get() && !connected.isClosed) {
@@ -98,15 +96,7 @@ class HostStreamService : Service() {
                         if (image != null) {
                             try {
                                 val jpeg = imageToJpeg(image)
-                                if (jpeg != null) {
-                                    synchronized(outputLock) {
-                                        if (clientRunning.get() && !connected.isClosed) {
-                                            out.writeInt(jpeg.size)
-                                            out.write(jpeg)
-                                            out.flush()
-                                        }
-                                    }
-                                }
+                                if (jpeg != null && clientRunning.get()) channel.send(jpeg)
                             } finally {
                                 image.close()
                             }
@@ -114,7 +104,7 @@ class HostStreamService : Service() {
                         Thread.sleep(75)
                     }
                 } catch (_: Exception) {
-                    // End this client session; keep the host server available for reconnect.
+                    // Reject unauthenticated clients and close this session.
                 } finally {
                     clientRunning.set(false)
                     try { connected.close() } catch (_: Exception) {}
@@ -165,21 +155,25 @@ class HostStreamService : Service() {
         return bytes.toByteArray()
     }
 
-    private fun readRemoteInput(socket: Socket, clientRunning: AtomicBoolean) {
+    private fun readRemoteInput(channel: SecureChannel, socket: Socket, clientRunning: AtomicBoolean) {
         try {
-            val input = socket.getInputStream().bufferedReader()
             while (running.get() && clientRunning.get() && !socket.isClosed) {
-                val line = input.readLine() ?: break
+                val bytes = channel.receive()
+                if (bytes.size > 256) throw SecurityException("Input command too large")
+                val line = bytes.toString(Charsets.UTF_8)
                 val parts = line.split(",")
-                if (parts.size == 6 && parts[0] == "G") {
-                    val values = parts.drop(1).map { it.toFloat() }
-                    RemoteInputAccessibilityService.performNormalizedGesture(
-                        values[0], values[1], values[2], values[3], values[4].toLong()
-                    )
-                }
+                if (parts.size != 6 || parts[0] != "G") continue
+                val values = parts.drop(1).map { it.toFloatOrNull() ?: Float.NaN }
+                if (values.any { !it.isFinite() } ||
+                    values[0] !in 0f..1f || values[1] !in 0f..1f ||
+                    values[2] !in 0f..1f || values[3] !in 0f..1f) continue
+                val duration = parts[5].toLongOrNull() ?: continue
+                if (duration !in 80L..1000L) continue
+                RemoteInputAccessibilityService.performNormalizedGesture(
+                    values[0], values[1], values[2], values[3], duration
+                )
             }
         } catch (_: Exception) {
-        } finally {
             clientRunning.set(false)
         }
     }
@@ -202,7 +196,7 @@ class HostStreamService : Service() {
         return if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("Remote Game Stream")
-                .setContentText("Host screen sharing is active on port 5000")
+                .setContentText("Encrypted screen sharing is active on port 5000")
                 .setSmallIcon(android.R.drawable.presence_video_online)
                 .setOngoing(true).build()
         } else {
@@ -219,6 +213,7 @@ class HostStreamService : Service() {
         stopCapture()
         try { projection?.stop() } catch (_: Exception) {}
         projection = null
+        pairingCode = null
         super.onDestroy()
     }
 
