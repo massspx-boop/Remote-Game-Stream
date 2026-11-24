@@ -16,7 +16,6 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
-import android.util.DisplayMetrics
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.net.ServerSocket
@@ -45,7 +44,7 @@ class HostStreamService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (running.get()) return START_STICKY
+        if (running.get()) return START_NOT_STICKY
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
         val data = if (Build.VERSION.SDK_INT >= 33) {
             intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
@@ -75,51 +74,74 @@ class HostStreamService : Service() {
 
     private fun serve() {
         try {
-            server = ServerSocket(5000)
-            server!!.reuseAddress = true
+            server = ServerSocket(5000).apply { reuseAddress = true }
             startCapture()
+
             while (running.get()) {
-                val connected = server!!.accept()
-                client = connected
-                connected.tcpNoDelay = true
-                val out = DataOutputStream(BufferedOutputStream(connected.getOutputStream()))
-                Thread({ readRemoteInput(connected) }, "remote-input").start()
-                while (running.get() && connected.isConnected && !connected.isClosed) {
-                    val image = reader?.acquireLatestImage()
-                    if (image != null) {
-                        try {
-                            val jpeg = imageToJpeg(image)
-                            if (jpeg != null) {
-                                synchronized(outputLock) {
-                                    out.writeInt(jpeg.size)
-                                    out.write(jpeg)
-                                    out.flush()
-                                }
-                            }
-                        } finally {
-                            image.close()
-                        }
-                    }
-                    Thread.sleep(75)
+                val connected = try {
+                    server?.accept() ?: break
+                } catch (_: Exception) {
+                    if (running.get()) throw
+                    break
                 }
-                stopCapture()
-                try { connected.close() } catch (_: Exception) {}
-                client = null
+                client = connected
+                val clientRunning = AtomicBoolean(true)
+                try {
+                    connected.tcpNoDelay = true
+                    val out = DataOutputStream(BufferedOutputStream(connected.getOutputStream()))
+                    Thread({
+                        readRemoteInput(connected, clientRunning)
+                    }, "remote-input").start()
+
+                    while (running.get() && clientRunning.get() && !connected.isClosed) {
+                        val image = reader?.acquireLatestImage()
+                        if (image != null) {
+                            try {
+                                val jpeg = imageToJpeg(image)
+                                if (jpeg != null) {
+                                    synchronized(outputLock) {
+                                        if (clientRunning.get() && !connected.isClosed) {
+                                            out.writeInt(jpeg.size)
+                                            out.write(jpeg)
+                                            out.flush()
+                                        }
+                                    }
+                                }
+                            } finally {
+                                image.close()
+                            }
+                        }
+                        Thread.sleep(75)
+                    }
+                } catch (_: Exception) {
+                    // End this client session; keep the host server available for reconnect.
+                } finally {
+                    clientRunning.set(false)
+                    try { connected.close() } catch (_: Exception) {}
+                    client = null
+                }
             }
         } catch (_: Exception) {
-            // A disconnected client or stopped service ends the current stream.
+            // Server stopped or screen capture failed.
         } finally {
+            running.set(false)
             stopCapture()
+            try { server?.close() } catch (_: Exception) {}
+            server = null
         }
     }
 
     private fun startCapture() {
-        val width = 640
-        val height = 360
+        val metrics = resources.displayMetrics
+        val sourceWidth = metrics.widthPixels.coerceAtLeast(1)
+        val sourceHeight = metrics.heightPixels.coerceAtLeast(1)
+        val scale = 640f / maxOf(sourceWidth, sourceHeight)
+        val width = (sourceWidth * scale).toInt().coerceAtLeast(1)
+        val height = (sourceHeight * scale).toInt().coerceAtLeast(1)
+
         reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
-        val density = resources.displayMetrics.densityDpi
         virtualDisplay = projection?.createVirtualDisplay(
-            "RemoteGameStream", width, height, density,
+            "RemoteGameStream", width, height, metrics.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             reader!!.surface, null, null
         )
@@ -143,20 +165,23 @@ class HostStreamService : Service() {
         return bytes.toByteArray()
     }
 
-    private fun readRemoteInput(socket: Socket) {
+    private fun readRemoteInput(socket: Socket, clientRunning: AtomicBoolean) {
         try {
             val input = socket.getInputStream().bufferedReader()
-            while (running.get() && !socket.isClosed) {
+            while (running.get() && clientRunning.get() && !socket.isClosed) {
                 val line = input.readLine() ?: break
-                val p = line.split(",")
-                if (p.size == 6 && p[0] == "G") {
-                    val values = p.drop(1).map { it.toFloat() }
+                val parts = line.split(",")
+                if (parts.size == 6 && parts[0] == "G") {
+                    val values = parts.drop(1).map { it.toFloat() }
                     RemoteInputAccessibilityService.performNormalizedGesture(
                         values[0], values[1], values[2], values[3], values[4].toLong()
                     )
                 }
             }
-        } catch (_: Exception) { }
+        } catch (_: Exception) {
+        } finally {
+            clientRunning.set(false)
+        }
     }
 
     private fun stopCapture() {
