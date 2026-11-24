@@ -60,6 +60,11 @@ class HostStreamService : Service() {
         try {
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             projection = manager.getMediaProjection(resultCode, data)
+            projection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    stopSelf()
+                }
+            }, android.os.Handler(mainLooper))
             running.set(true)
             Thread({ serve() }, "stream-server").start()
         } catch (_: Exception) {
@@ -72,13 +77,13 @@ class HostStreamService : Service() {
         try {
             server = ServerSocket(5000)
             server!!.reuseAddress = true
+            startCapture()
             while (running.get()) {
                 val connected = server!!.accept()
                 client = connected
                 connected.tcpNoDelay = true
                 val out = DataOutputStream(BufferedOutputStream(connected.getOutputStream()))
                 Thread({ readRemoteInput(connected) }, "remote-input").start()
-                startCapture(out)
                 while (running.get() && connected.isConnected && !connected.isClosed) {
                     val image = reader?.acquireLatestImage()
                     if (image != null) {
@@ -108,7 +113,7 @@ class HostStreamService : Service() {
         }
     }
 
-    private fun startCapture(out: DataOutputStream) {
+    private fun startCapture() {
         val width = 640
         val height = 360
         reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
