@@ -9,27 +9,23 @@ import android.graphics.RectF
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
-import java.io.DataInputStream
-import java.io.DataOutputStream
-import java.io.PrintWriter
+import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
     private val requestCapture = 4102
     private lateinit var projectionManager: MediaProjectionManager
     private val executor = Executors.newSingleThreadExecutor()
-    private var clientSocket: Socket? = null
-    private var clientWriter: PrintWriter? = null
+    @Volatile private var clientSocket: Socket? = null
+    @Volatile private var clientChannel: SecureChannel? = null
     private lateinit var streamImage: ImageView
     private lateinit var status: TextView
     private var touchStartX = 0f
@@ -64,25 +60,35 @@ class MainActivity : Activity() {
             hint = "Host IP ဥပမာ 192.168.1.5"
             setSingleLine(true)
         }
+        val pairing = EditText(this).apply {
+            hint = "Host မှာပြထားတဲ့ 12 လုံး Pairing Code"
+            setSingleLine(true)
+            isSingleLine = true
+        }
         root.addView(ip)
-        root.addView(button("ချိတ်ဆက်မယ်") {
+        root.addView(pairing)
+        root.addView(text("Host ဖုန်းပေါ်မှာ ပြထားတဲ့ Code ကိုသာ ထည့်ပါ။", 13f))
+        root.addView(button("လုံခြုံစွာ ချိတ်ဆက်မယ်") {
             val host = ip.text.toString().trim()
+            val code = pairing.text.toString().trim().uppercase(Locale.US)
             if (host.isBlank()) {
                 Toast.makeText(this, "Host IP ထည့်ပါ", Toast.LENGTH_SHORT).show()
+            } else if (code.length != 12) {
+                Toast.makeText(this, "Pairing Code 12 လုံး ထည့်ပါ", Toast.LENGTH_SHORT).show()
             } else {
-                showClientScreen(host)
+                showClientScreen(host, code)
             }
         })
         root.addView(button("နောက်သို့") { showHome() })
         setContentView(root)
     }
 
-    private fun showClientScreen(host: String) {
+    private fun showClientScreen(host: String, pairingCode: String) {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xff101010.toInt())
         }
-        status = text("ချိတ်ဆက်နေသည် — $host:5000", 14f)
+        status = text("လုံခြုံသော ချိတ်ဆက်မှု တည်ဆောက်နေသည်…", 14f)
         root.addView(status)
         streamImage = ImageView(this).apply {
             adjustViewBounds = true
@@ -91,6 +97,7 @@ class MainActivity : Activity() {
         }
         root.addView(streamImage, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(button("ချိတ်ဆက်မှုဖြတ်မယ်") {
+            clientChannel = null
             try { clientSocket?.close() } catch (_: Exception) {}
             showHome()
         })
@@ -98,31 +105,36 @@ class MainActivity : Activity() {
 
         executor.execute {
             try {
-                val socket = Socket(host, 5000)
-                clientSocket = socket
+                val socket = Socket()
+                socket.connect(InetSocketAddress(host, 5000), 10_000)
                 socket.tcpNoDelay = true
-                val writer = PrintWriter(BufferedOutputStream(socket.getOutputStream()), true)
-                clientWriter = writer
-                runOnUiThread { status.text = "ချိတ်ဆက်ပြီး — $host" }
-                val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
+                clientSocket = socket
+                val channel = SecureChannel.connect(socket, pairingCode)
+                clientChannel = channel
+                runOnUiThread { status.text = "လုံခြုံစွာ ချိတ်ဆက်ပြီး — $host" }
                 while (!socket.isClosed) {
-                    val size = input.readInt()
-                    if (size <= 0 || size > 8 * 1024 * 1024) throw IllegalStateException("Frame size မမှန်ပါ")
-                    val bytes = ByteArray(size)
-                    input.readFully(bytes)
+                    val bytes = channel.receive()
                     val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
-                    runOnUiThread { streamImage.setImageBitmap(bitmap) }
+                    runOnUiThread {
+                        if (!isFinishing && ::streamImage.isInitialized) streamImage.setImageBitmap(bitmap)
+                    }
                 }
             } catch (e: Exception) {
+                clientChannel = null
                 runOnUiThread {
-                    if (::status.isInitialized) status.text = "ချိတ်ဆက်မှု ပြတ်သွားသည်: ${e.message ?: "Network error"}"
+                    if (::status.isInitialized) {
+                        status.text = when (e) {
+                            is SecurityException -> "Pairing Code မမှန်ပါ၊ သို့မဟုတ် Host ကို အတည်မပြုနိုင်ပါ"
+                            else -> "ချိတ်ဆက်မှု ပြတ်သွားသည်: ${e.message ?: "Network error"}"
+                        }
+                    }
                 }
             }
         }
 
-        streamImage.setOnTouchListener { view, event ->
-            val writer = clientWriter
-            if (writer == null) {
+        streamImage.setOnTouchListener { _, event ->
+            val channel = clientChannel
+            if (channel == null) {
                 false
             } else {
                 when (event.action) {
@@ -139,9 +151,9 @@ class MainActivity : Activity() {
                         val point = normalizedPoint(streamImage, event.x, event.y)
                         if (point != null) {
                             val duration = (event.eventTime - touchStartTime).coerceIn(80L, 1000L)
-                            synchronized(writer) {
-                                writer.println("G,$touchStartX,$touchStartY,${point.first},${point.second},$duration")
-                            }
+                            val command = "G,$touchStartX,$touchStartY,${point.first},${point.second},$duration"
+                            try { channel.send(command.toByteArray(Charsets.UTF_8)) }
+                            catch (_: Exception) { clientChannel = null }
                         }
                         true
                     }
@@ -161,20 +173,25 @@ class MainActivity : Activity() {
         val ny = ((y - rect.top) / rect.height()).coerceIn(0f, 1f)
         return nx to ny
     }
+
     @Deprecated("Deprecated by Android, retained for compatibility with older versions")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == requestCapture && resultCode == RESULT_OK && data != null) {
+            val pairingCode = SecureChannel.generatePairingCode()
             val service = Intent(this, HostStreamService::class.java).apply {
                 putExtra(HostStreamService.EXTRA_RESULT_CODE, resultCode)
                 putExtra(HostStreamService.EXTRA_RESULT_DATA, data)
+                putExtra(HostStreamService.EXTRA_PAIRING_CODE, pairingCode)
             }
             startForegroundService(service)
             val ip = wifiIpAddress()
-            Toast.makeText(this, "Host စတင်နေသည်။ Client မှာ $ip:5000 ထည့်ပါ", Toast.LENGTH_LONG).show()
             val root = column()
             root.addView(text("HOST MODE စတင်နေသည်", 22f))
-            root.addView(text("Host IP: $ip\nPort: 5000\nClient ဖုန်းနှင့် Wi-Fi တစ်ခုတည်းကို ချိတ်ထားပါ။", 17f))
+            root.addView(text("Host IP: $ip\nPort: 5000", 17f))
+            root.addView(text("PAIRING CODE", 15f))
+            root.addView(text(pairingCode, 25f))
+            root.addView(text("ဒီ Code ကို ကိုယ်ပိုင် Client ဖုန်းမှာသာ ထည့်ပါ။ အခြားသူကို မမျှဝေပါနှင့်။ Host ရပ်ပြီး ပြန်စရင် Code အသစ်ရပါမယ်။", 14f))
             root.addView(button("Accessibility Settings ဖွင့်ရန်") {
                 startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
             })
@@ -215,6 +232,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        clientChannel = null
         try { clientSocket?.close() } catch (_: Exception) {}
         executor.shutdownNow()
     }
