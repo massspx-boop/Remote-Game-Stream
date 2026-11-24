@@ -2,12 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
         android:allowBackup="false"
-        android:label="Remote Game Stream"
+        android:label="ဖုန်းအချင်းချင်း ဂိမ်းမျှဝေခြင်း"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
         <activity
@@ -25,7 +26,7 @@
             android:foregroundServiceType="mediaProjection" />
         <service
             android:name=".RemoteInputAccessibilityService"
-            android:label="Remote Game Stream Input"
+            android:label="အဝေးထိန်း Touch ဝန်ဆောင်မှု"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true">
             <intent-filter>
