@@ -55,7 +55,7 @@ class SecureChannel private constructor(
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, nonce))
         cipher.updateAAD(nonce)
-        return cipher.doFinal(encrypted)
+        cipher.doFinal(encrypted)
     }
 
     companion object {
