@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.graphics.BitmapFactory
+import android.graphics.RectF
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
@@ -22,7 +23,6 @@ import java.io.DataOutputStream
 import java.io.PrintWriter
 import java.net.Socket
 import java.util.concurrent.Executors
-import kotlin.math.max
 
 class MainActivity : Activity() {
     private val requestCapture = 4102
@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private var touchStartX = 0f
     private var touchStartY = 0f
+    private var touchStartTime = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -121,28 +122,45 @@ class MainActivity : Activity() {
 
         streamImage.setOnTouchListener { view, event ->
             val writer = clientWriter
-            if (writer != null) {
+            if (writer == null) {
+                false
+            } else {
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
-                        touchStartX = (event.x / max(1f, view.width.toFloat())).coerceIn(0f, 1f)
-                        touchStartY = (event.y / max(1f, view.height.toFloat())).coerceIn(0f, 1f)
-                        true
+                        val point = normalizedPoint(view, event.x, event.y)
+                        if (point == null) false else {
+                            touchStartX = point.first
+                            touchStartY = point.second
+                            touchStartTime = event.eventTime
+                            true
+                        }
                     }
                     MotionEvent.ACTION_UP -> {
-                        val x = (event.x / max(1f, view.width.toFloat())).coerceIn(0f, 1f)
-                        val y = (event.y / max(1f, view.height.toFloat())).coerceIn(0f, 1f)
-                        synchronized(writer) {
-                            writer.println("G,$touchStartX,$touchStartY,$x,$y,250")
+                        val point = normalizedPoint(view, event.x, event.y)
+                        if (point != null) {
+                            val duration = (event.eventTime - touchStartTime).coerceIn(80L, 1000L)
+                            synchronized(writer) {
+                                writer.println("G,$touchStartX,$touchStartY,${point.first},${point.second},$duration")
+                            }
                         }
                         true
                     }
                     MotionEvent.ACTION_CANCEL -> true
                     else -> true
                 }
-            } else false
+            }
         }
     }
 
+    private fun normalizedPoint(view: ImageView, x: Float, y: Float): Pair<Float, Float>? {
+        val drawable = view.drawable ?: return null
+        val rect = RectF(0f, 0f, drawable.intrinsicWidth.toFloat(), drawable.intrinsicHeight.toFloat())
+        view.imageMatrix.mapRect(rect)
+        if (rect.width() <= 0f || rect.height() <= 0f || !rect.contains(x, y)) return null
+        val nx = ((x - rect.left) / rect.width()).coerceIn(0f, 1f)
+        val ny = ((y - rect.top) / rect.height()).coerceIn(0f, 1f)
+        return nx to ny
+    }
     @Deprecated("Deprecated by Android, retained for compatibility with older versions")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
