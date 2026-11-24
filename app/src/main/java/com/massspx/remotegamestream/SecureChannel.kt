@@ -27,9 +27,10 @@ class SecureChannel private constructor(
 ) {
     private var sendCounter = 0L
     private var receiveCounter = 0L
+    private val sendLock = Any()
+    private val receiveLock = Any()
 
-    @Synchronized
-    fun send(plain: ByteArray) {
+    fun send(plain: ByteArray) = synchronized(sendLock) {
         require(plain.size <= MAX_RECORD_SIZE) { "Record too large" }
         check(sendCounter >= 0) { "Send counter exhausted" }
         val nonce = nonce(sendDirection, sendCounter++)
@@ -42,8 +43,7 @@ class SecureChannel private constructor(
         output.flush()
     }
 
-    @Synchronized
-    fun receive(): ByteArray {
+    fun receive(): ByteArray = synchronized(receiveLock) {
         check(receiveCounter >= 0) { "Receive counter exhausted" }
         val size = input.readInt()
         if (size < GCM_TAG_BYTES || size > MAX_RECORD_SIZE + GCM_TAG_BYTES) {
