@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">Remote Game Stream</string>
-    <string name="accessibility_description">Allows the connected client to send touch gestures to this phone while streaming.</string>
+    <string name="app_name">ဖုန်းအချင်းချင်း ဂိမ်းမျှဝေခြင်း</string>
+    <string name="accessibility_description">ချိတ်ဆက်ထားသော Client ဖုန်းမှ Touch လုပ်ဆောင်ချက်များကို ဒီဖုန်းသို့ ပို့ရန် အသုံးပြုသည်။</string>
 </resources>
