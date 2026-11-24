@@ -160,6 +160,10 @@ class MainActivity : Activity() {
             root.addView(button("Accessibility Settings ဖွင့်ရန်") {
                 startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS))
             })
+            root.addView(button("Screen Stream ရပ်မယ်") {
+                stopService(Intent(this, HostStreamService::class.java))
+                showHome()
+            })
             root.addView(button("Home သို့ပြန်မယ်") { showHome() })
             setContentView(root)
         }
