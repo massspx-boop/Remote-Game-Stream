@@ -80,8 +80,8 @@ class HostStreamService : Service() {
             while (running.get()) {
                 val connected = try {
                     server?.accept() ?: break
-                } catch (_: Exception) {
-                    if (running.get()) throw
+                } catch (e: Exception) {
+                    if (running.get()) throw e
                     break
                 }
                 client = connected
