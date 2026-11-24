@@ -127,7 +127,7 @@ class MainActivity : Activity() {
             } else {
                 when (event.action) {
                     MotionEvent.ACTION_DOWN -> {
-                        val point = normalizedPoint(view, event.x, event.y)
+                        val point = normalizedPoint(streamImage, event.x, event.y)
                         if (point == null) false else {
                             touchStartX = point.first
                             touchStartY = point.second
