@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Remote Game Stream</string>
+    <string name="accessibility_description">Allows the connected client to send touch gestures to this phone while streaming.</string>
+</resources>
