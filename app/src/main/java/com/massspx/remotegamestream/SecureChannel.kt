@@ -77,7 +77,7 @@ class SecureChannel private constructor(
         }
 
         fun accept(socket: Socket, pairingCode: String): SecureChannel {
-            socket.soTimeout = 15_000
+            socket.soTimeout = 8_000
             val input = DataInputStream(socket.getInputStream().buffered())
             val output = DataOutputStream(socket.getOutputStream().buffered())
             val salt = ByteArray(16).also(random::nextBytes)
