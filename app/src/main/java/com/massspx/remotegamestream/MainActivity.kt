@@ -136,7 +136,7 @@ class MainActivity : Activity() {
                         }
                     }
                     MotionEvent.ACTION_UP -> {
-                        val point = normalizedPoint(view, event.x, event.y)
+                        val point = normalizedPoint(streamImage, event.x, event.y)
                         if (point != null) {
                             val duration = (event.eventTime - touchStartTime).coerceIn(80L, 1000L)
                             synchronized(writer) {
